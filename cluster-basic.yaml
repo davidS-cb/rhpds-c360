@@ -15,6 +15,7 @@ spec:
     selector:
       matchLabels:
         cluster: cb-example
+  antiAffinity: true
   servers:
     - size: 3
       name: diq
@@ -22,6 +23,8 @@ spec:
         - data
         - index
         - query
+      volumeMounts:
+        default: couchbase
   networking:
     adminConsoleServices:
       - data
@@ -30,9 +33,16 @@ spec:
     exposedFeatureServiceType: NodePort
     exposedFeatures:
       - xdcr
-      - client
+  volumeClaimTemplates:
+    - metadata:
+        name: couchbase
+      spec:
+        storageClassName: gp2
+        resources:
+          requests:
+            storage: 5Gi
   cluster:
-    autoFailoverTimeout: 20s
+    autoFailoverTimeout: 120s
     autoFailoverOnDataDiskIssues: true
     clusterName: cb-example
     indexStorageSetting: memory_optimized
@@ -67,11 +77,11 @@ spec:
   logRetentionCount: 20
 status:
   size: 0
-—-
+---
 apiVersion: couchbase.com/v2
 kind: CouchbaseBucket
 metadata:
-  name: tweets
+  name: staging
   labels:
     cluster: cb-example
 spec:

@@ -43,10 +43,10 @@ oc login --token=sha256~QMJIQOfJq00YNoVh2nQUgwsy6ZifXS7Jt4OTsnJAP8Q --server=htt
 Next, we need to create a project.
 
 ```
-oc new-project couchbase
+oc new-project customer360
 ```
 
-This command creates the `couchbase` project and switches to it.
+This command creates the `customer360` project and switches to it.
 
 ### Deploy Couchbase Credentials Secret
 
@@ -60,7 +60,7 @@ oc create -f secret.yaml
 
 ### Deploy a Basic Couchbase Cluster
 
-The first cluster that we'll deploy will be a simple, 3 node cluster, with one bucket and 2 replicas.
+The cluster that we'll deploy will be a simple, 3 node cluster, with one bucket and 2 replicas.
 
 ```
 oc create -f cluster-basic.yaml
@@ -106,150 +106,258 @@ On the Pods page in OpenShift (https://console-openshift-console.apps.cluster-<C
 ![](img/os-cluster-basic.png)
 
 
-### Build and Deploy an App
+### Deploy the Red Hat Integration Operator from OperatorHub
 
-![](img/couchbase-app-1.png)
+![](img/operatorhub.png)
 
-> Note: in order to follow this section, you will need a twitter developer account. If you do not have an account, please contact david.schexnayder@couchbase.com and I will provide temporary credentials.
+Search for Red Hat Integration
 
-In order to help demonstrate the Couchbase Autonomous Operator in action, we'll deploy a simple real-time analytics application that ingests tweets from Twitter's API into Couchbase. We will then simulate a node failure and observe how the application and Couchbase respond.
+Install into “All namespaces on the cluster (default)
+Once the Operator is installed, click Create instance
 
-The application is made up of 3 microservices:
+#### Install the AMQ Streams Operator
 
-1. Tweet Ingester Service - The tweet ingester is a Java application that consumes tweet in real-time from Twitter's APIs into Couchbase.
-2. API Service - The API service is Java application that provides several REST end points for exposing data ingested by the Tweet Ingester Service. Under the hood, it is running SQL queries against Couchbase.
-3. UI Service - The UI service is a simple Node server that serves a React SPA (single page application). The UI provides visualizations of the data provided by the API Service.
-
-#### Deploy the API Service
-
-First, we'll deploy the API service.
+Create a Red Hat Integration Installation for AMQ Streams
 
 ```
-oc new-app registry.access.redhat.com/redhat-openjdk-18/openjdk18-openshift:latest~https://github.com/couchbase-partners/redhat-pds.git#release-2.0 \
-      -e COUCHBASE_CLUSTER=cb-example \
-      -e COUCHBASE_USER=Administrator \
-      -e COUCHBASE_PASSWORD=password \
-      -e COUCHBASE_TWEET_BUCKET=tweets \
-      --context-dir=cb-rh-twitter/twitter-api \
-      --name=twitter-api
+apiVersion: integration.redhat.com/v1
+kind: Installation
+metadata:
+ name: rhi-installation
+spec:
+ 3scale-apicast-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-3scale-apicast
+ amq-broker-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-amq-broker
+ fuse-online-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-fuse-online
+ api-designer-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-api-designer
+ 3scale-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-3scale
+ amq-interconnect-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-amq-interconnect
+ service-registry-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-service-registry
+ camel-k-installation:
+   enabled: false
+   mode: cluster
+ fuse-console-installation:
+   enabled: false
+   mode: namespace
+   namespace: rhi-fuse-console
+ amq-streams-installation:
+   enabled: true
+   mode: cluster
+```
+#### Deploy Kafka
+
+Once the installation is complete, navigate to Installed Operators and click on Red Hat Integration AMQ Streams
+
+Click Create Kafka
+```
+apiVersion: kafka.strimzi.io/v1beta1
+kind: Kafka
+metadata:
+ name: my-cluster
+ namespace: customer360
+spec:
+ clientsCa:
+   certificateExpirationPolicy: renew-certificate
+   generateCertificateAuthority: true
+   renewalDays: 30
+   validityDays: 365
+ kafka:
+   config:
+     auto.create.topics.enable: "true"
+     offsets.topic.replication.factor: 1
+     transaction.state.log.replication.factor: 1
+     transaction.state.log.min.isr: 1
+     log.message.format.version: '2.6'
+     inter.broker.protocol.version: '2.6'
+   version: 2.6.0
+   storage:
+     type: ephemeral
+   replicas: 1
+   listeners:
+     - name: plain
+       port: 9092
+       type: internal
+       tls: false
+     - name: tls
+       port: 9093
+       type: internal
+       tls: true
+ entityOperator:
+   topicOperator: {}
+   userOperator: {}
+ zookeeper:
+   storage:
+     type: ephemeral
+   replicas: 1
+ clusterCa:
+   certificateExpirationPolicy: renew-certificate
+   generateCertificateAuthority: true
+   renewalDays: 30
+   validityDays: 365
+```
+Note: The process will take a few minutes while all resources are being created.
+Once complete you should see the status as:
+
+Note: The Warning, Warning conditions are due to single replicas of the zookeeper and kafka brokers and can be ignored for this demo.
+
+#### Deploy Kafka Connect
+
+```
+kind: KafkaConnect
+metadata:
+  name: my-connect-cluster
+  namespace: customer360
+spec:
+  bootstrapServers: 'my-cluster-kafka-bootstrap:9093'
+  version: 2.6.0
+  tls:
+    trustedCertificates:
+      - secretName: my-cluster-cluster-ca-cert
+        certificate: ca.crt
+  config:
+    config.storage.replication.factor: 1
+    offset.storage.replication.factor: 1
+    status.storage.replication.factor: 1
+  image: 'dschexna/couchbezium:latest'
+  replicas: 1
+```
+Create a route for the kafka-connect deployment
+
+#### Install MySQL
+
+Deploy the Debezium MySQL instance with some tables pre-populated.
+
+```
+oc new-app --name=mysql debezium/example-mysql:1.4 -e MYSQL_ROOT_PASSWORD=debezium -e MYSQL_USER=mysqluser -e MYSQL_PASSWORD=mysqlpw
+```
+Access the MySQL instance
+```
+oc exec -it mysql-5478fc7f96-8fkmh -- bash -c 'mysql -u $MYSQL_USER -p$MYSQL_PASSWORD inventory'
+```
+Show tables in the ‘inventory’ database
+```
+mysql> show tables;
++---------------------+
+| Tables_in_inventory |
++---------------------+
+| addresses           |
+| customers           |
+| geom                |
+| orders              |
+| products            |
+| products_on_hand    |
++---------------------+
+6 rows in set (0.00 sec)
+```
+Post the configuration for the Kafka connector for MySQL
+```
+curl -X POST \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://my-connect-cluster-api-customer360.apps.ocpeast1aws.couchbasedemos.com/connectors -d @- <<'EOF'
+{
+    "name": "inventory-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "tasks.max": "1",
+        "database.hostname": "mysql",
+        "database.port": "3306",
+        "database.user": "root",
+        "database.password": "debezium",
+        "database.server.id": "184054",
+        "database.server.name": "dbserver1",
+        "database.include.list": "inventory",
+        "database.history.kafka.bootstrap.servers": "my-cluster-kafka-bootstrap:9092",
+        "database.history.kafka.topic": "schema-changes.inventory"
+    }
+}
+EOF
+```
+Post the configuration for the Kafka connector for Couchbase
+```
+curl -X POST \
+    -H "Accept:application/json" \
+    -H "Content-Type:application/json" \
+    http://my-connect-cluster-api-customer360.apps.ocpeast1aws.couchbasedemos.com/connectors -d @- <<'EOF'
+
+{
+    "name": "customers-sink",
+    "config": {
+        "connector.class": "com.couchbase.connect.kafka.CouchbaseSinkConnector",
+        "tasks.max": "2",
+        "topics" : "dbserver1.inventory.customers",
+        "couchbase.seed.nodes" : "cb-example-0000",
+        "connection.timeout.ms" : "2000",
+        "couchbase.bucket" : "staging",
+        "couchbase.username" : "Administrator",
+        "couchbase.password" : "password",
+        "couchbase.durability.persist_to" : "NONE",
+        "couchbase.durability.replicate_to" : "NONE",
+        "key.converter" : "org.apache.kafka.connect.storage.StringConverter",
+        "value.converter" : "org.apache.kafka.connect.json.JsonConverter",
+        "value.converter.schemas.enable" : "false"
+    }
+}
+EOF
 ```
 
-You can watch the build process by running `oc logs -f bc/twitter-api`. Once this is completed it will deploy a pod running the API service.
+#### Couchbase Query Workbench
 
-Now let's expose the API service so it is accessible publicly:
+The data should now be populated from MySQL into Couchbase.
 
-```
-oc expose svc twitter-api
-```
-
-This should create a route to http://twitter-api-operator-example.apps.couchbase-<CLUSTER_ID>.openshiftworkshop.com. Open the URL http://twitter-api-operator-example.apps.couchbase-<CLUSTER_ID>.openshiftworkshop.com/tweetcount in your browser and you should see a number 0 in your browser. This is a simple API endpoint that returns the number of tweets ingested.
-
-#### Deploy the UI Service
-
-Next, we'll deploy the UI service. This service is a simple node server serving up a ReactJS app. For expediency, a Docker image is already built. We can also deploy Docker images directly with the `new-app` command:
+From the Couchbase Web UI, create a primary index for querying the data:
 
 ```
-oc new-app ezeev/twitter-ui:latest
+create primary index on staging;
 ```
-
-This will deploy our UI service. Let's expose it so we can access it:
-
+View the records populated via Kafka
 ```
-oc expose svc twitter-ui
+select s.payload.after
+R
+from staging s;
 ```
+#### MySQL command-line
 
-This should expose a route to https://twitter-ui-couchbase.apps.cluster-<CLUSTER_ID>.opentlc.com/. Visit this link. You should see a dashboard load **with empty charts**. We will start populating them in the next step after deploying the Tweet Ingester Service.
-
-Now, add the following request parameter to the URL in your browser: `?apiBase=<exposed route to API service>`. The complete URL should look like:
-
+Alter a single record
 ```
-https://twitter-ui-couchbase.apps.cluster-<CLUSTER_ID>.opentlc.com/?apiBase=http://twitter-api-operator-example.apps.couchbase-<CLUSTER_ID>.openshiftworkshop.com
+UPDATE customers SET first_name='Anne Marie' WHERE id=1004;
 ```
-
-
-#### Deploy the Tweet Ingester Service
-
-Now that we have our API and UI deployed, we are ready to start ingesting and visualizing twitter data! This is a Java application like the API service, so we will deploy it the exact same way:
-
+Insert records
 ```
-oc new-app registry.access.redhat.com/redhat-openjdk-18/openjdk18-openshift:latest~https://github.com/couchbase-partners/redhat-pds.git#release-2.0 \
-       -e TWITTER_CONSUMER_KEY=p1AIfFhwlD0HUVOPwNwD3ZpR4 \
-       -e TWITTER_CONSUMER_SECRET=5hnvkBgziPNnhGY6dMg2C5GEWB7dsayXwdp2F5Sl9B6bMfwzl6 \
-       -e TWITTER_TOKEN=26575781-4KKPE5adSBRXN8s3OUWa6tFcYQNiPJ43UpBtXDiaD \
-       -e TWITTER_SECRET=tybhfMESsotG6zUCFpqUsUHr08L0W0eHbxv2CglvY98Of \
-       -e TWITTER_FILTER='#coronavirus' \
-       -e COUCHBASE_CLUSTER=cb-example \
-       -e COUCHBASE_USER=Administrator \
-       -e COUCHBASE_PASSWORD=password \
-       -e COUCHBASE_TWEET_BUCKET=tweets \
-       --context-dir=cb-rh-twitter/twitter-streamer \
-       --name=twitter-streamer
+INSERT INTO customers VALUES (default, "Nick", "Wallace", "nick@acme.com");
+INSERT INTO customers VALUES (default, "Jacob", "Gay", "jgay@data.com");
+INSERT INTO customers VALUES (default, "David", "Rojas", "drojas@acme.com");
+INSERT INTO customers VALUES (default, "Ryan", "Massey", "rmassey@acme.com");
+INSERT INTO customers VALUES (default, "Anthony", "Farinha", "kander@acme.com");
+INSERT INTO customers VALUES (default, "Paul", "Brown", "pbrown@earthlink.net");
 ```
-
-You can watch the build with `oc logs -f bc/cb-rh-twitter`. When this is completed you should see a new pod created for the twitter streamer.
-
-At this point you should also see new documents appearing in the tweets bucket in Couchbase, and in the UI at http://twitter-ui-operator-example.apps.couchbase-<CLUSTER_ID>.openshiftworkshop.com/.
-
-### Failover Demo
-
-Now that we have a cluster up with some data, we can demonstrate the operator in action.
-
-First, delete one of the pods:
-
-```
-oc delete pod cb-example-0002
-```
-
-By deleting the pod, we are destroying one of the Couchbase nodes. At this point the operator should take over and try to recover the cluster to our desired state.
-
-Couchbase recognizes that a node is missing and triggers fail-over:
-
-![](img/failover-1.png)
-
-Couchbase recognizes the new node coming online and begins rebalancing:
-
-![](img/failover-2.png)
-
-The rebalance continues until the cluster is fully healed.
-
-![](img/failover-3.png)
 
 ### Cleanup
 
-Delete the cluster before moving onto the next example:
+The quickest way to reset the cluster back to the beginning, is to just delete the project. 
 
 ```
-oc delete -f cluster-basic.yaml
+oc delete project customer360
 ```
-
-To remove the twitter streaming app:
-
-```
-oc delete dc twitter-streamer
-oc delete bc twitter-streamer
-oc delete svc twitter-streamer
-```
-
-## Deploy a Cluster with Server Groups Enabled
-
-First, we need to add labels to our OpenShift nodes. Labels are used to tell the Operator which zone a particular node belongs too. In this example, we'll declare the node1 and node2 belong to ServerGroup1. Our node2 and node3 will belong to ServerGroup2.
-
-```
- oc label --overwrite nodes node1.couchbase.internal server-group.couchbase.com/zone=ServerGroup1
- oc label --overwrite nodes node2.couchbase.internal server-group.couchbase.com/zone=ServerGroup1
- oc label --overwrite nodes node3.couchbase.internal server-group.couchbase.com/zone=ServerGroup2
- oc label --overwrite nodes node4.couchbase.internal server-group.couchbase.com/zone=ServerGroup2
-```
-
-Now deploy the new cluster:
-
-```
-oc create -f cluster-server-groups.yaml
-```
-
-This deploys a 9 node cluster with ServerGroups enabled. The distribution of nodes is setup so that each zone has 2 Data nodes and 1 Query node. This allows us to keep 2 replicas of the default bucket in each zone.
-
-![](img/9node-server-list.png)
-
 
 [def]: https://docs.couchbase.com/operator/current/install-openshift.html
